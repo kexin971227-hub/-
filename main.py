@@ -10,14 +10,46 @@ BASE_URL = f"https://api.safew.org/bot{BOT_TOKEN}"
 DATA_FILE = "data.json"
 GROUP_ID = -10000602092
 
-# 应到人员名单
-FIXED_NAMES = [
-    "小明", "林云", "林强", "小飞", "小涛", "甄子丹", "路克", "招财",
-    "啊朕", "阿鬼", "2胖", "黑龙", "太阳", "晴天", "罗杰", "阿火",
-    "胖胖", "小二", "南", "振亮", "冰岛", "九", "小康", "阿枫",
-    "毛毛", "阿飞", "蓝心羽", "阿乐", "星辰", "旺仔", "大蛇", "舒克",
-    "安仔", "南宫", "阿超", "小九", "老二"
-]
+# 应到人员名单（姓名 -> ID 映射）
+FIXED_USERS = {
+    "小明": "13234569",
+    "林云": "13321501",
+    "林强": "13235219",
+    "小飞": "13235403",
+    "小涛": "13234715",
+    "甄子丹": "13234945",
+    "路克": "13235100",
+    "招财": "13235185",
+    "啊朕": "13233448",
+    "阿鬼": "13198948",
+    "2胖": "13198655",
+    "黑龙": "13326014",
+    "太阳": "13327822",
+    "晴天": "13234468",
+    "罗杰": "13200020",
+    "阿火": "13234881",
+    "胖胖": "13198739",
+    "小二": "13198841",
+    "南": "13233106",
+    "振亮": "13198523",
+    "冰岛": "13235012",
+    "九": "13198171",
+    "小康": "13234840",
+    "阿枫": "13321490",
+    "毛毛": "13233117",
+    "阿飞": "13232756",
+    "蓝心羽": "13232984",
+    "阿乐": "10515461",
+    "星辰": "13198685",
+    "旺仔": "13305478",
+    "大蛇": "13233303",
+    "舒克": "13233506",
+    "安仔": "13199957",
+    "南宫": "13234669",
+    "阿超": "13233739",
+    "小九": "13317648",
+    "老二": "13234476"
+}
 
 EXCLUDE_NAMES = ["Ellen匪", "表", "雨夜带刀不带伞", "红牛", "二东", "阿航", "大力出奇迹"]
 
@@ -69,45 +101,133 @@ def get_timeout_info(activity, seconds):
         return f"{fmt(seconds)} ⚠️ 超时 {fmt(overtime)}"
     return fmt(seconds)
 
-def get_attendance_report():
+def get_full_attendance_report():
+    """生成全员个人明细考勤报告"""
     db = load()
-    today = datetime.now().strftime("%Y-%m-%d")
-    checked_users = []
-    for key, u in db.items():
-        work_start = u.get("work_start", "")
-        if work_start.startswith(today):
-            checked_users.append(key)
-    checked_names = []
-    absent_names = []
-    for name in FIXED_NAMES:
+    now = datetime.now()
+    today = now.strftime("%Y-%m-%d")
+    weekday = now.weekday()
+    
+    if weekday == 6:
+        deadline = now.replace(hour=12, minute=0, second=0, microsecond=0)
+    else:
+        deadline = now.replace(hour=9, minute=0, second=0, microsecond=0)
+    
+    # 收集每个人的数据
+    user_data = {}
+    for name, uid in FIXED_USERS.items():
         if name in EXCLUDE_NAMES:
             continue
-        if name in checked_users:
-            checked_names.append(name)
+        u = db.get(uid, {})
+        work_start = u.get("work_start", "")
+        check_time = None
+        if work_start.startswith(today):
+            try:
+                check_time = datetime.fromisoformat(work_start)
+            except:
+                check_time = deadline
+        
+        # 活动统计
+        daily_activity = u.get("daily_activity", {})
+        activities = {}
+        total_activity_time = 0
+        for act in ["吃饭", "上厕所", "抽烟", "其他"]:
+            duration = daily_activity.get(act, 0)
+            if duration > 0:
+                activities[act] = duration
+                total_activity_time += duration
+        
+        # 次数统计
+        counts = {
+            "上班次数": u.get("上班次数", 0),
+            "下班次数": u.get("下班次数", 0),
+            "吃饭次数": u.get("吃饭次数", 0),
+            "上厕所次数": u.get("上厕所次数", 0),
+            "抽烟次数": u.get("抽烟次数", 0),
+            "其他次数": u.get("其他次数", 0),
+            "总工作时长": u.get("总工作时长", 0)
+        }
+        
+        user_data[name] = {
+            "check_time": check_time,
+            "activities": activities,
+            "total_activity_time": total_activity_time,
+            "counts": counts
+        }
+    
+    # 分类：准时、迟到、缺勤
+    on_time_list = []
+    late_list = []
+    absent_list = []
+    
+    for name, data in user_data.items():
+        ct = data["check_time"]
+        if ct is None:
+            absent_list.append(name)
+        elif ct <= deadline:
+            on_time_list.append((name, ct))
         else:
-            absent_names.append(name)
-    daily_activity = {"吃饭": 0, "上厕所": 0, "抽烟": 0, "其他": 0}
-    for key, u in db.items():
-        da = u.get("daily_activity", {})
-        for act in daily_activity:
-            daily_activity[act] += da.get(act, 0)
-    msg = f"📊 今日考勤统计 ({today})\n"
-    msg += f"👥 应到人数：{len([n for n in FIXED_NAMES if n not in EXCLUDE_NAMES])} 人\n"
-    msg += f"✅ 实到人数：{len(checked_names)} 人\n\n"
-    if checked_names:
-        msg += f"✅ 已打卡名单：\n" + "、".join(checked_names) + "\n\n"
-    if absent_names:
-        msg += f"❌ 缺勤名单：\n" + "、".join(absent_names) + "\n\n"
-    msg += f"📊 今日活动汇总：\n"
-    for act, total in daily_activity.items():
-        msg += f"{act}：{fmt(total)}\n"
+            late_list.append((name, ct))
+    
+    # 生成报告
+    msg = f"📊 今日考勤明细 ({today})\n\n"
+    
+    if on_time_list:
+        msg += f"⏰ 准时 ({len(on_time_list)}人)：\n"
+        for name, ct in sorted(on_time_list, key=lambda x: x[1]):
+            msg += f"  {name} {ct.strftime('%H:%M:%S')}\n"
+        msg += "\n"
+    
+    if late_list:
+        msg += f"⚠️ 迟到 ({len(late_list)}人)：\n"
+        for name, ct in sorted(late_list, key=lambda x: x[1]):
+            msg += f"  {name} {ct.strftime('%H:%M:%S')}\n"
+        msg += "\n"
+    
+    if absent_list:
+        msg += f"❌ 缺勤 ({len(absent_list)}人)：\n"
+        for name in absent_list:
+            msg += f"  {name}（未打卡）\n"
+        msg += "\n"
+    
+    # 个人活动明细
+    msg += f"📋 个人活动明细：\n"
+    for name in FIXED_USERS:
+        if name in EXCLUDE_NAMES:
+            continue
+        d = user_data[name]
+        if d["check_time"] is None and not d["activities"]:
+            continue  # 完全没数据的跳过
+        
+        msg += f"\n{name}：\n"
+        if d["total_activity_time"] > 0:
+            msg += f"  今日活动总时长：{fmt(d['total_activity_time'])}\n"
+        for act, dur in d["activities"].items():
+            msg += f"  {act}：{fmt(dur)}\n"
+        
+        # 显示次数统计（如果有）
+        cnt = d["counts"]
+        if cnt["上班次数"] > 0 or cnt["吃饭次数"] > 0:
+            msg += f"  累计：上班{cnt['上班次数']}次，下班{cnt['下班次数']}次"
+            if cnt["吃饭次数"] > 0:
+                msg += f"，吃饭{cnt['吃饭次数']}次"
+            if cnt["上厕所次数"] > 0:
+                msg += f"，上厕所{cnt['上厕所次数']}次"
+            if cnt["抽烟次数"] > 0:
+                msg += f"，抽烟{cnt['抽烟次数']}次"
+            msg += "\n"
+    
+    # 汇总统计
+    total_expected = len([n for n in FIXED_USERS if n not in EXCLUDE_NAMES])
+    total_present = len(on_time_list) + len(late_list)
+    msg += f"\n📈 全员汇总：\n"
+    msg += f"  应到人数：{total_expected} 人\n"
+    msg += f"  实到人数：{total_present} 人\n"
+    msg += f"  缺勤人数：{len(absent_list)} 人\n"
+    msg += f"  迟到人数：{len(late_list)} 人\n"
+    
     msg += f"\n✅ 统计不影响打卡状态，无需重新打卡"
     return msg
-
-def send_report_to_group():
-    msg = get_attendance_report()
-    send(GROUP_ID, msg)
-    print("已发送考勤统计到群组")
 
 def daily_reset_loop():
     while True:
@@ -134,7 +254,9 @@ def schedule_loop():
         wait_seconds = (target - now).total_seconds()
         print(f"下次统计时间: {target.strftime('%Y-%m-%d %H:%M:%S')}")
         time.sleep(wait_seconds)
-        send_report_to_group()
+        report = get_full_attendance_report()
+        send(GROUP_ID, report)
+        print("已发送考勤统计到群组")
 
 threading.Thread(target=daily_reset_loop, daemon=True).start()
 threading.Thread(target=schedule_loop, daemon=True).start()
@@ -142,6 +264,7 @@ threading.Thread(target=schedule_loop, daemon=True).start()
 print("机器人启动...")
 print("每日凌晨3点重置数据")
 print("周一到周六9:10、周日12:10自动发送考勤统计")
+print("发送 /sendreport 查看全员个人明细")
 
 last_id = 0
 keyboard_activated = set()
@@ -170,7 +293,7 @@ while True:
             text = msg.get("text", "").strip()
             
             if text == "/sendreport":
-                report = get_attendance_report()
+                report = get_full_attendance_report()
                 send(chat_id, report)
                 continue
             
@@ -189,7 +312,7 @@ while True:
             elif text in ["其", "其他"]:
                 cmd = "其他"
             elif text == "/start":
-                send(chat_id, f"📋 打卡机器人\n👤 {user_name}\n🆔 {user_id}\n\n上-上班 下-下班 回-回座\n吃/厕/抽/其-活动\n发送 /sendreport 查看统计")
+                send(chat_id, f"📋 打卡机器人\n👤 {user_name}\n🆔 {user_id}\n\n上-上班 下-下班 回-回座\n吃/厕/抽/其-活动\n发送 /sendreport 查看全员考勤明细")
                 continue
             else:
                 continue
@@ -270,10 +393,6 @@ while True:
                     msgs.append(f"✅ 下班成功 {ts}")
                     msgs.append(f"本段：{fmt(wdur)}")
                     msgs.append(f"总工作时长：{fmt(new_u['总工作时长'])}")
-                    msgs.append(f"\n📊 今日活动汇总：")
-                    for act in ["吃饭", "上厕所", "抽烟", "其他"]:
-                        act_time = daily_activity.get(act, 0)
-                        msgs.append(f"{act}：{fmt(act_time)}")
                     send(chat_id, "\n".join(msgs))
             
             # 回座
@@ -328,4 +447,4 @@ while True:
         
     except Exception as e:
         print(f"错误: {e}")
-        time.sleep(3)
+        time.sleep(3) 
