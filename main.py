@@ -1,9 +1,15 @@
 import json
 import os
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import time
 import threading
+
+# ========== 北京时间 UTC+8 ==========
+BEIJING_TZ = timezone(timedelta(hours=8))
+
+def beijing_now():
+    return datetime.now(BEIJING_TZ)
 
 BOT_TOKEN = "13243514:3DFu4gK87ZWCPu4nWdLWY21Q4mZy2DgZZBG"
 BASE_URL = f"https://api.safew.org/bot{BOT_TOKEN}"
@@ -102,15 +108,16 @@ def get_timeout_info(activity, seconds):
     return fmt(seconds)
 
 def get_full_attendance_report():
-    """生成全员个人明细考勤报告"""
+    """生成全员个人明细考勤报告（北京时间 + 每人活动时间）"""
     db = load()
-    now = datetime.now()
+    now = beijing_now()
     today = now.strftime("%Y-%m-%d")
     weekday = now.weekday()
     
-    if weekday == 6:
+    # 迟到截止时间（北京时间）
+    if weekday == 6:  # 周日
         deadline = now.replace(hour=12, minute=0, second=0, microsecond=0)
-    else:
+    else:  # 周一到周六
         deadline = now.replace(hour=9, minute=0, second=0, microsecond=0)
     
     # 收集每个人的数据
@@ -124,8 +131,10 @@ def get_full_attendance_report():
         if work_start.startswith(today):
             try:
                 check_time = datetime.fromisoformat(work_start)
+                if check_time.tzinfo is None:
+                    check_time = check_time.replace(tzinfo=BEIJING_TZ)
             except:
-                check_time = deadline
+                pass
         
         # 活动统计
         daily_activity = u.get("daily_activity", {})
@@ -190,14 +199,14 @@ def get_full_attendance_report():
             msg += f"  {name}（未打卡）\n"
         msg += "\n"
     
-    # 个人活动明细
+    # 个人活动明细（每人活动时间）
     msg += f"📋 个人活动明细：\n"
     for name in FIXED_USERS:
         if name in EXCLUDE_NAMES:
             continue
         d = user_data[name]
         if d["check_time"] is None and not d["activities"]:
-            continue  # 完全没数据的跳过
+            continue
         
         msg += f"\n{name}：\n"
         if d["total_activity_time"] > 0:
@@ -205,7 +214,6 @@ def get_full_attendance_report():
         for act, dur in d["activities"].items():
             msg += f"  {act}：{fmt(dur)}\n"
         
-        # 显示次数统计（如果有）
         cnt = d["counts"]
         if cnt["上班次数"] > 0 or cnt["吃饭次数"] > 0:
             msg += f"  累计：上班{cnt['上班次数']}次，下班{cnt['下班次数']}次"
@@ -231,7 +239,7 @@ def get_full_attendance_report():
 
 def daily_reset_loop():
     while True:
-        now = datetime.now()
+        now = beijing_now()
         next_reset = now.replace(hour=3, minute=0, second=0, microsecond=0)
         if now >= next_reset:
             next_reset += timedelta(days=1)
@@ -243,7 +251,7 @@ def daily_reset_loop():
 
 def schedule_loop():
     while True:
-        now = datetime.now()
+        now = beijing_now()
         weekday = now.weekday()
         if weekday == 6:
             target = now.replace(hour=12, minute=10, second=0, microsecond=0)
@@ -292,6 +300,7 @@ while True:
             user_name = msg["from"].get("first_name", "") or str(user_id)
             text = msg.get("text", "").strip()
             
+            # 命令映射
             if text == "/sendreport":
                 report = get_full_attendance_report()
                 send(chat_id, report)
@@ -303,13 +312,13 @@ while True:
                 cmd = "下班"
             elif text in ["回", "回座"]:
                 cmd = "回座"
-            elif text in ["吃", "吃饭"]:
+            elif text in ["吃", "cf", "吃饭"]:
                 cmd = "吃饭"
-            elif text in ["厕", "上厕所"]:
+            elif text in ["厕", "厕所", "wc", "sc", "上厕所"]:
                 cmd = "上厕所"
-            elif text in ["抽", "抽烟"]:
+            elif text in ["抽", "cy", "抽烟"]:
                 cmd = "抽烟"
-            elif text in ["其", "其他"]:
+            elif text in ["其", "其他", "qt"]:
                 cmd = "其他"
             elif text == "/start":
                 send(chat_id, f"📋 打卡机器人\n👤 {user_name}\n🆔 {user_id}\n\n上-上班 下-下班 回-回座\n吃/厕/抽/其-活动\n发送 /sendreport 查看全员考勤明细")
@@ -323,7 +332,7 @@ while True:
             key = user_id
             u = db.get(key, {"state": "off"})
             
-            now = datetime.now()
+            now = beijing_now()
             ts = now.strftime("%m/%d %H:%M:%S")
             today = now.strftime("%Y-%m-%d")
             state = u.get("state", "off")
@@ -447,4 +456,4 @@ while True:
         
     except Exception as e:
         print(f"错误: {e}")
-        time.sleep(3)  
+        time.sleep(3)
