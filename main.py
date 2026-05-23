@@ -16,7 +16,7 @@ BASE_URL = f"https://api.safew.org/bot{BOT_TOKEN}"
 DATA_FILE = "data.json"
 GROUP_ID = -10000602092
 
-# 应到人员名单（姓名 -> ID 映射）
+# 应到人员名单
 FIXED_USERS = {
     "小明": "13234569",
     "林云": "13321501",
@@ -99,16 +99,8 @@ def fmt(seconds):
         return f"{m}分钟"
     return f"{m}分{s}秒"
 
-def get_timeout_info(activity, seconds):
-    limits = {"抽烟": 5, "上厕所": 15, "吃饭": 30}
-    limit = limits.get(activity, 0)
-    if limit and seconds > limit * 60:
-        overtime = seconds - limit * 60
-        return f"{fmt(seconds)} ⚠️ 超时 {fmt(overtime)}"
-    return fmt(seconds)
-
 def get_full_attendance_report():
-    """生成全员个人明细考勤报告（包含超时明细）"""
+    """生成考勤报告（每次活动单独判断超时）"""
     db = load()
     now = beijing_now()
     today = now.strftime("%Y-%m-%d")
@@ -134,25 +126,28 @@ def get_full_attendance_report():
             except:
                 pass
         
+        # 活动累计时长（用于显示总时长）
         daily_activity = u.get("daily_activity", {})
-        activities = {}
-        total_activity_time = 0
-        for act in ["吃饭", "上厕所", "抽烟", "其他"]:
-            duration = daily_activity.get(act, 0)
-            if duration > 0:
-                activities[act] = duration
-                total_activity_time += duration
+        total_activity_time = sum(daily_activity.get(act, 0) for act in ["吃饭", "上厕所", "抽烟", "其他"])
         
-        # 超时次数统计（从历史记录中获取，需要在活动中记录超时次数）
-        # 简化：从超时次数字段读取
-        timeout_counts = {
-            "抽烟": u.get("抽烟超时次数", 0),
-            "上厕所": u.get("上厕所超时次数", 0),
-            "吃饭": u.get("吃饭超时次数", 0)
-        }
+        # 获取每次活动的详细记录
+        activity_records = u.get("activity_records", [])
+        today_records = [r for r in activity_records if r.get("date") == today]
         
-        # 超时明细（每次超时的具体时长）
-        timeout_details = u.get("timeout_details", [])
+        # 超时记录（从活动记录中筛选）
+        timeout_limits = {"抽烟": 5, "上厕所": 15, "吃饭": 30}
+        timeout_records = []
+        for record in today_records:
+            act = record.get("activity")
+            duration = record.get("duration", 0)
+            limit = timeout_limits.get(act, 0)
+            if limit and duration > limit * 60:
+                timeout_records.append({
+                    "activity": act,
+                    "duration": duration - limit * 60,
+                    "time": record.get("time", ""),
+                    "total_duration": duration
+                })
         
         counts = {
             "上班次数": u.get("上班次数", 0),
@@ -163,15 +158,12 @@ def get_full_attendance_report():
             "其他次数": u.get("其他次数", 0),
             "总工作时长": u.get("总工作时长", 0),
             "漏打卡次数": u.get("漏打卡次数", 0),
-            "抽烟超时次数": timeout_counts.get("抽烟", 0),
-            "上厕所超时次数": timeout_counts.get("上厕所", 0),
-            "吃饭超时次数": timeout_counts.get("吃饭", 0),
-            "timeout_details": timeout_details
+            "activity_records": today_records,
+            "timeout_records": timeout_records
         }
         
         user_data[name] = {
             "check_time": check_time,
-            "activities": activities,
             "total_activity_time": total_activity_time,
             "counts": counts
         }
@@ -214,41 +206,38 @@ def get_full_attendance_report():
         if name in EXCLUDE_NAMES:
             continue
         d = user_data[name]
-        if d["check_time"] is None and not d["activities"] and d["counts"]["漏打卡次数"] == 0:
+        records = d["counts"]["activity_records"]
+        timeout_records = d["counts"]["timeout_records"]
+        
+        if d["check_time"] is None and not records and d["counts"]["漏打卡次数"] == 0:
             continue
         
         msg += f"\n{name}：\n"
         if d["total_activity_time"] > 0:
             msg += f"  今日活动总时长：{fmt(d['total_activity_time'])}\n"
         
-        # 活动明细（含超时）
-        for act, dur in d["activities"].items():
-            # 获取超时信息
+        # 显示每次活动（含超时标记）
+        for record in records:
+            act = record.get("activity")
+            duration = record.get("duration", 0)
             limit = {"抽烟": 5, "上厕所": 15, "吃饭": 30}.get(act, 0)
-            if limit and dur > limit * 60:
-                overtime = dur - limit * 60
-                msg += f"  {act}：{fmt(dur)} ⚠️ 超时 {fmt(overtime)}\n"
+            time_str = record.get("time", "")
+            if limit and duration > limit * 60:
+                overtime = duration - limit * 60
+                msg += f"  {act}：{fmt(duration)} ⚠️ 超时 {fmt(overtime)}\n"
             else:
-                msg += f"  {act}：{fmt(dur)}\n"
+                msg += f"  {act}：{fmt(duration)}\n"
         
         cnt = d["counts"]
         
-        # 漏打卡次数
         if cnt["漏打卡次数"] > 0:
             msg += f"  ⚠️ 漏打卡次数：{cnt['漏打卡次数']}\n"
         
-        # 超时次数
-        timeout_parts = []
-        if cnt["抽烟超时次数"] > 0:
-            timeout_parts.append(f"抽烟{cnt['抽烟超时次数']}次")
-        if cnt["上厕所超时次数"] > 0:
-            timeout_parts.append(f"上厕所{cnt['上厕所超时次数']}次")
-        if cnt["吃饭超时次数"] > 0:
-            timeout_parts.append(f"吃饭{cnt['吃饭超时次数']}次")
-        if timeout_parts:
-            msg += f"  ⚠️ 超时次数：{'，'.join(timeout_parts)}\n"
+        if timeout_records:
+            msg += f"  ⚠️ 超时明细：\n"
+            for record in timeout_records:
+                msg += f"    • {record['activity']}：{fmt(record['duration'])}（{record['time']}）\n"
         
-        # 累计次数
         if cnt["上班次数"] > 0 or cnt["吃饭次数"] > 0:
             msg += f"  累计：上班{cnt['上班次数']}次，下班{cnt['下班次数']}次"
             if cnt["吃饭次数"] > 0:
@@ -369,6 +358,8 @@ while True:
             today = now.strftime("%Y-%m-%d")
             state = u.get("state", "off")
             
+            if "activity_records" not in u:
+                u["activity_records"] = []
             if "daily_activity" not in u:
                 u["daily_activity"] = {}
             daily_activity = u.get("daily_activity", {})
@@ -376,6 +367,7 @@ while True:
             if u.get("last_date") != today:
                 daily_activity = {"吃饭": 0, "上厕所": 0, "抽烟": 0, "其他": 0}
                 u["daily_activity"] = daily_activity
+                u["activity_records"] = []
                 u["last_date"] = today
             
             # 上班
@@ -394,9 +386,7 @@ while True:
                         "抽烟次数": u.get("抽烟次数", 0),
                         "其他次数": u.get("其他次数", 0),
                         "漏打卡次数": u.get("漏打卡次数", 0),
-                        "抽烟超时次数": u.get("抽烟超时次数", 0),
-                        "上厕所超时次数": u.get("上厕所超时次数", 0),
-                        "吃饭超时次数": u.get("吃饭超时次数", 0),
+                        "activity_records": u.get("activity_records", []),
                         "daily_activity": daily_activity,
                         "last_date": today
                     }
@@ -418,13 +408,17 @@ while True:
                         u[act_count_key] = u.get(act_count_key, 0) + 1
                         daily_activity[act] = daily_activity.get(act, 0) + adur
                         
-                        # 记录超时次数
-                        limit = {"抽烟": 5, "上厕所": 15, "吃饭": 30}.get(act, 0)
-                        if limit and adur > limit * 60:
-                            timeout_key = act + "超时次数"
-                            u[timeout_key] = u.get(timeout_key, 0) + 1
+                        # 记录每次活动
+                        activity_records = u.get("activity_records", [])
+                        activity_records.append({
+                            "date": today,
+                            "time": ts,
+                            "activity": act,
+                            "duration": adur
+                        })
+                        u["activity_records"] = activity_records
                         
-                        msgs.append(f"📝 结束活动：{act}（{get_timeout_info(act, adur)}）")
+                        msgs.append(f"📝 结束活动：{act}（{fmt(adur)}）")
                     wdur = int((now - datetime.fromisoformat(u["work_start"])).total_seconds())
                     u["总工作时长"] = u.get("总工作时长", 0) + wdur
                     u["下班次数"] = u.get("下班次数", 0) + 1
@@ -438,9 +432,7 @@ while True:
                         "抽烟次数": u.get("抽烟次数", 0),
                         "其他次数": u.get("其他次数", 0),
                         "漏打卡次数": u.get("漏打卡次数", 0),
-                        "抽烟超时次数": u.get("抽烟超时次数", 0),
-                        "上厕所超时次数": u.get("上厕所超时次数", 0),
-                        "吃饭超时次数": u.get("吃饭超时次数", 0),
+                        "activity_records": u.get("activity_records", []),
                         "daily_activity": daily_activity,
                         "last_date": today
                     }
@@ -468,11 +460,15 @@ while True:
                     u[act_count_key] = u.get(act_count_key, 0) + 1
                     daily_activity[act] = daily_activity.get(act, 0) + adur
                     
-                    # 记录超时次数
-                    limit = {"抽烟": 5, "上厕所": 15, "吃饭": 30}.get(act, 0)
-                    if limit and adur > limit * 60:
-                        timeout_key = act + "超时次数"
-                        u[timeout_key] = u.get(timeout_key, 0) + 1
+                    # 记录每次活动
+                    activity_records = u.get("activity_records", [])
+                    activity_records.append({
+                        "date": today,
+                        "time": ts,
+                        "activity": act,
+                        "duration": adur
+                    })
+                    u["activity_records"] = activity_records
                     
                     u["state"] = "working"
                     u.pop("activity", None)
@@ -481,20 +477,12 @@ while True:
                     db[key] = u
                     save(db)
                     
-                    # 获取超时信息用于显示
-                    limit = {"抽烟": 5, "上厕所": 15, "吃饭": 30}.get(act, 0)
-                    if limit and adur > limit * 60:
-                        overtime = adur - limit * 60
-                        duration_str = f"{fmt(adur)} ⚠️ 超时 {fmt(overtime)}"
-                    else:
-                        duration_str = fmt(adur)
-                    
                     send(chat_id,
                         f"👤 {user_name}\n"
                         f"🆔 {user_id}\n"
                         f"✅ 回座成功\n"
                         f"活动：{act}\n"
-                        f"本次时长：{duration_str}\n"
+                        f"本次时长：{fmt(adur)}\n"
                         f"第{u[act_count_key]}次{act}\n"
                         f"今日{act}总时长：{fmt(daily_activity.get(act, 0))}")
             
