@@ -4,6 +4,33 @@ import requests
 from datetime import datetime, timedelta, timezone
 import time
 import threading
+import logging
+
+# ========== 日志配置 ==========
+LOG_DIR = "logs"
+if not os.path.exists(LOG_DIR):
+    os.makedirs(LOG_DIR)
+
+# 配置日志格式
+log_filename = os.path.join(LOG_DIR, f"bot_{datetime.now().strftime('%Y-%m-%d')}.log")
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_filename, encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+def log_print(msg, level="info"):
+    if level == "info":
+        logger.info(msg)
+    elif level == "error":
+        logger.error(msg)
+    elif level == "warning":
+        logger.warning(msg)
+    print(msg)
 
 # ========== 北京时间 UTC+8 ==========
 BEIJING_TZ = timezone(timedelta(hours=8))
@@ -15,6 +42,9 @@ BOT_TOKEN = "13243514:3DFu4gK87ZWCPu4nWdLWY21Q4mZy2DgZZBG"
 BASE_URL = f"https://api.safew.org/bot{BOT_TOKEN}"
 DATA_FILE = "data.json"
 GROUP_ID = -10000602092
+
+# 管理员ID列表（接收重置前的考勤记录）
+ADMIN_IDS = [13227717]  # 管理员ID
 
 # 应到人员名单
 FIXED_USERS = {
@@ -85,8 +115,36 @@ def send(chat_id, text):
         if "📋" in text:
             payload["reply_markup"] = KEYBOARD
         requests.post(url, json=payload, timeout=5)
-    except:
-        pass
+    except Exception as e:
+        log_print(f"发送消息失败: {e}", "error")
+
+def send_long_message(chat_id, text, max_len=4096):
+    if len(text) <= max_len:
+        send(chat_id, text)
+        return
+    
+    lines = text.split('\n')
+    current_page = ""
+    page_num = 1
+    total_pages = (len(text) + max_len - 1) // max_len
+    
+    for line in lines:
+        if len(current_page) + len(line) + 1 > max_len:
+            if total_pages > 1:
+                current_page += f"\n\n--- 第 {page_num}/{total_pages} 页 ---"
+            send(chat_id, current_page)
+            page_num += 1
+            current_page = line
+        else:
+            if current_page:
+                current_page += "\n" + line
+            else:
+                current_page = line
+    
+    if current_page:
+        if total_pages > 1:
+            current_page += f"\n\n--- 第 {page_num}/{total_pages} 页 ---"
+        send(chat_id, current_page)
 
 def fmt(seconds):
     if seconds < 0:
@@ -126,15 +184,12 @@ def get_full_attendance_report():
             except:
                 pass
         
-        # 活动累计时长（用于显示总时长）
         daily_activity = u.get("daily_activity", {})
         total_activity_time = sum(daily_activity.get(act, 0) for act in ["吃饭", "上厕所", "抽烟", "其他"])
         
-        # 获取每次活动的详细记录
         activity_records = u.get("activity_records", [])
         today_records = [r for r in activity_records if r.get("date") == today]
         
-        # 超时记录（从活动记录中筛选）
         timeout_limits = {"抽烟": 5, "上厕所": 15, "吃饭": 30}
         timeout_records = []
         for record in today_records:
@@ -216,12 +271,10 @@ def get_full_attendance_report():
         if d["total_activity_time"] > 0:
             msg += f"  今日活动总时长：{fmt(d['total_activity_time'])}\n"
         
-        # 显示每次活动（含超时标记）
         for record in records:
             act = record.get("activity")
             duration = record.get("duration", 0)
             limit = {"抽烟": 5, "上厕所": 15, "吃饭": 30}.get(act, 0)
-            time_str = record.get("time", "")
             if limit and duration > limit * 60:
                 overtime = duration - limit * 60
                 msg += f"  {act}：{fmt(duration)} ⚠️ 超时 {fmt(overtime)}\n"
@@ -259,6 +312,17 @@ def get_full_attendance_report():
     msg += f"\n✅ 统计不影响打卡状态，无需重新打卡"
     return msg
 
+def send_reset_report():
+    """发送重置前的考勤报告给管理员"""
+    report = get_full_attendance_report()
+    now = beijing_now()
+    header = f"📋【数据备份】即将重置考勤数据\n⏰ 重置时间：{now.strftime('%Y-%m-%d %H:%M:%S')}\n📅 数据日期：{(now - timedelta(days=1)).strftime('%Y-%m-%d')}\n\n"
+    full_msg = header + report
+    
+    for admin_id in ADMIN_IDS:
+        send_long_message(admin_id, full_msg)
+    log_print(f"已发送重置前考勤报告给 {len(ADMIN_IDS)} 位管理员")
+
 def daily_reset_loop():
     while True:
         now = beijing_now()
@@ -266,10 +330,17 @@ def daily_reset_loop():
         if now >= next_reset:
             next_reset += timedelta(days=1)
         wait_seconds = (next_reset - now).total_seconds()
-        print(f"距离下次数据重置还有 {wait_seconds/3600:.1f} 小时")
+        log_print(f"距离下次数据重置还有 {wait_seconds/3600:.1f} 小时")
         time.sleep(wait_seconds)
+        
+        # ========== 重置前发送报告给管理员 ==========
+        log_print("准备重置数据，正在发送备份报告给管理员...")
+        send_reset_report()
+        time.sleep(2)  # 等待报告发送完成
+        
+        # 清空数据
         save({})
-        print("每日考勤数据重置完成")
+        log_print("每日考勤数据重置完成")
 
 def schedule_loop():
     while True:
@@ -282,19 +353,22 @@ def schedule_loop():
         if now >= target:
             target += timedelta(days=1)
         wait_seconds = (target - now).total_seconds()
-        print(f"下次统计时间: {target.strftime('%Y-%m-%d %H:%M:%S')}")
+        log_print(f"下次统计时间: {target.strftime('%Y-%m-%d %H:%M:%S')}")
         time.sleep(wait_seconds)
         report = get_full_attendance_report()
-        send(GROUP_ID, report)
-        print("已发送考勤统计到群组")
+        send_long_message(GROUP_ID, report)
+        log_print("已发送考勤统计到群组")
 
+# 启动后台线程
 threading.Thread(target=daily_reset_loop, daemon=True).start()
 threading.Thread(target=schedule_loop, daemon=True).start()
 
-print("机器人启动...")
-print("每日凌晨3点重置数据")
-print("周一到周六9:10、周日12:10自动发送考勤统计")
-print("发送 /sendreport 查看全员个人明细")
+log_print("机器人启动...")
+log_print("每日凌晨3点重置数据")
+log_print("周一到周六9:10、周日12:10自动发送考勤统计")
+log_print("发送 /sendreport 查看全员个人明细")
+log_print(f"日志文件保存在: {LOG_DIR}/")
+log_print(f"管理员ID: {ADMIN_IDS}")
 
 last_id = 0
 keyboard_activated = set()
@@ -324,7 +398,7 @@ while True:
             
             if text == "/sendreport":
                 report = get_full_attendance_report()
-                send(chat_id, report)
+                send_long_message(chat_id, report)
                 continue
             
             if text in ["上", "上班"]:
@@ -347,7 +421,7 @@ while True:
             else:
                 continue
             
-            print(f"{user_name}: {cmd}")
+            log_print(f"{user_name}: {cmd}")
             
             db = load()
             key = user_id
@@ -408,7 +482,6 @@ while True:
                         u[act_count_key] = u.get(act_count_key, 0) + 1
                         daily_activity[act] = daily_activity.get(act, 0) + adur
                         
-                        # 记录每次活动
                         activity_records = u.get("activity_records", [])
                         activity_records.append({
                             "date": today,
@@ -460,7 +533,6 @@ while True:
                     u[act_count_key] = u.get(act_count_key, 0) + 1
                     daily_activity[act] = daily_activity.get(act, 0) + adur
                     
-                    # 记录每次活动
                     activity_records = u.get("activity_records", [])
                     activity_records.append({
                         "date": today,
@@ -511,5 +583,5 @@ while True:
         time.sleep(0.5)
         
     except Exception as e:
-        print(f"错误: {e}")
+        log_print(f"主循环错误: {e}", "error")
         time.sleep(3)
