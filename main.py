@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import time
 import threading
 import logging
+import re
 
 # ========== 日志配置 ==========
 LOG_DIR = "logs"
@@ -44,7 +45,7 @@ DATA_FILE = "data.json"
 GROUP_ID = -10000602092
 
 # 管理员ID列表（接收重置前的考勤记录）
-ADMIN_IDS = [13227717]  # 管理员ID
+ADMIN_IDS = [13227717]
 
 # 应到人员名单
 FIXED_USERS = {
@@ -119,32 +120,90 @@ def send(chat_id, text):
         log_print(f"发送消息失败: {e}", "error")
 
 def send_long_message(chat_id, text, max_len=4096):
+    """分页发送长消息，自动判断是否需要分页，保持每个员工完整"""
     if len(text) <= max_len:
         send(chat_id, text)
+        log_print(f"发送单条消息 (长度: {len(text)} 字符)")
         return
     
     lines = text.split('\n')
-    current_page = ""
-    page_num = 1
-    total_pages = (len(text) + max_len - 1) // max_len
     
-    for line in lines:
-        if len(current_page) + len(line) + 1 > max_len:
+    # 找到所有员工开始的位置（格式："姓名："）
+    employee_indices = []
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if re.match(r'^[\u4e00-\u9fa5a-zA-Z0-9]+：$', stripped):
+            employee_indices.append(i)
+    
+    # 如果没有找到员工分割点，简单按行切分
+    if len(employee_indices) < 2:
+        current_page = ""
+        page_num = 1
+        total_pages = (len(text) + max_len - 1) // max_len
+        for line in lines:
+            if len(current_page) + len(line) + 1 > max_len:
+                if total_pages > 1:
+                    current_page += f"\n\n--- 第 {page_num}/{total_pages} 页 ---"
+                send(chat_id, current_page)
+                log_print(f"已发送第 {page_num}/{total_pages} 页")
+                page_num += 1
+                current_page = line
+            else:
+                if current_page:
+                    current_page += "\n" + line
+                else:
+                    current_page = line
+        if current_page:
             if total_pages > 1:
                 current_page += f"\n\n--- 第 {page_num}/{total_pages} 页 ---"
             send(chat_id, current_page)
-            page_num += 1
-            current_page = line
+            log_print(f"已发送第 {page_num}/{total_pages} 页")
+        return
+    
+    # 找到标题部分（准时/迟到/缺勤名单）
+    header_end = employee_indices[0]
+    header_lines = lines[:header_end]
+    header_text = '\n'.join(header_lines)
+    
+    # 收集所有员工块
+    employee_indices.append(len(lines))
+    employee_blocks = []
+    for idx in range(len(employee_indices) - 1):
+        start = employee_indices[idx]
+        end = employee_indices[idx + 1]
+        employee_text = '\n'.join(lines[start:end])
+        employee_blocks.append(employee_text)
+    
+    # 分页
+    pages = []
+    current_page = header_text
+    current_length = len(current_page)
+    
+    for block in employee_blocks:
+        block_len = len(block)
+        if current_length + block_len + 2 > max_len and current_length > len(header_text):
+            pages.append(current_page)
+            current_page = block
+            current_length = block_len
         else:
             if current_page:
-                current_page += "\n" + line
+                current_page += "\n\n" + block
+                current_length += block_len + 2
             else:
-                current_page = line
+                current_page = block
+                current_length = block_len
     
     if current_page:
+        pages.append(current_page)
+    
+    # 发送所有页面
+    total_pages = len(pages)
+    for i, page in enumerate(pages, 1):
         if total_pages > 1:
-            current_page += f"\n\n--- 第 {page_num}/{total_pages} 页 ---"
-        send(chat_id, current_page)
+            page += f"\n\n--- 第 {i}/{total_pages} 页 ---"
+        send(chat_id, page)
+        log_print(f"已发送第 {i}/{total_pages} 页 (长度: {len(page)} 字符)")
+        time.sleep(0.3)
 
 def fmt(seconds):
     if seconds < 0:
@@ -161,13 +220,20 @@ def get_full_attendance_report():
     """生成考勤报告（每次活动单独判断超时）"""
     db = load()
     now = beijing_now()
-    today = now.strftime("%Y-%m-%d")
-    weekday = now.weekday()
+    
+    # 如果当前时间在凌晨3点之前，日期按前一天计算
+    if now.hour < 3:
+        report_date = now - timedelta(days=1)
+    else:
+        report_date = now
+    
+    today = report_date.strftime("%Y-%m-%d")
+    weekday = report_date.weekday()
     
     if weekday == 6:
-        deadline = now.replace(hour=12, minute=0, second=0, microsecond=0)
+        deadline = report_date.replace(hour=12, minute=0, second=0, microsecond=0)
     else:
-        deadline = now.replace(hour=9, minute=0, second=0, microsecond=0)
+        deadline = report_date.replace(hour=9, minute=0, second=0, microsecond=0)
     
     user_data = {}
     for name, uid in FIXED_USERS.items():
@@ -288,8 +354,14 @@ def get_full_attendance_report():
         
         if timeout_records:
             msg += f"  ⚠️ 超时明细：\n"
+            idx = 1
             for record in timeout_records:
-                msg += f"    • {record['activity']}：{fmt(record['duration'])}（{record['time']}）\n"
+                total = record.get("total_duration", 0)
+                overtime = record.get("duration", 0)
+                time_str = record.get("time", "")
+                act = record.get("activity", "")
+                msg += f"    • 第{idx}次{act}：本次时长 {fmt(total)}，超时 {fmt(overtime)}（{time_str}）\n"
+                idx += 1
         
         if cnt["上班次数"] > 0 or cnt["吃饭次数"] > 0:
             msg += f"  累计：上班{cnt['上班次数']}次，下班{cnt['下班次数']}次"
@@ -314,14 +386,15 @@ def get_full_attendance_report():
 
 def send_reset_report():
     """发送重置前的考勤报告给管理员"""
-    report = get_full_attendance_report()
     now = beijing_now()
-    header = f"📋【数据备份】即将重置考勤数据\n⏰ 重置时间：{now.strftime('%Y-%m-%d %H:%M:%S')}\n📅 数据日期：{(now - timedelta(days=1)).strftime('%Y-%m-%d')}\n\n"
+    report = get_full_attendance_report()
+    
+    header = f"📋【数据备份】即将重置考勤数据\n⏰ 重置时间：{now.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
     full_msg = header + report
     
     for admin_id in ADMIN_IDS:
         send_long_message(admin_id, full_msg)
-    log_print(f"已发送重置前考勤报告给 {len(ADMIN_IDS)} 位管理员")
+    log_print(f"已发送备份考勤报告给 {len(ADMIN_IDS)} 位管理员")
 
 def daily_reset_loop():
     while True:
@@ -333,12 +406,10 @@ def daily_reset_loop():
         log_print(f"距离下次数据重置还有 {wait_seconds/3600:.1f} 小时")
         time.sleep(wait_seconds)
         
-        # ========== 重置前发送报告给管理员 ==========
         log_print("准备重置数据，正在发送备份报告给管理员...")
         send_reset_report()
-        time.sleep(2)  # 等待报告发送完成
+        time.sleep(2)
         
-        # 清空数据
         save({})
         log_print("每日考勤数据重置完成")
 
@@ -346,10 +417,18 @@ def schedule_loop():
     while True:
         now = beijing_now()
         weekday = now.weekday()
-        if weekday == 6:
+        # 定时发送也要考虑凌晨3点前的日期问题
+        if now.hour < 3:
+            send_date = now - timedelta(days=1)
+        else:
+            send_date = now
+        
+        send_weekday = send_date.weekday()
+        if send_weekday == 6:
             target = now.replace(hour=12, minute=10, second=0, microsecond=0)
         else:
             target = now.replace(hour=9, minute=10, second=0, microsecond=0)
+        
         if now >= target:
             target += timedelta(days=1)
         wait_seconds = (target - now).total_seconds()
@@ -444,7 +523,6 @@ while True:
                 u["activity_records"] = []
                 u["last_date"] = today
             
-            # 上班
             if cmd == "上班":
                 if state in ["working", "in_activity"]:
                     send(chat_id, f"👤 {user_name}\n🆔 {user_id}\n❌ 上班失败！已在上班中\n请先【下班】")
@@ -468,7 +546,6 @@ while True:
                     save(db)
                     send(chat_id, f"👤 {user_name}\n🆔 {user_id}\n✅ 上班成功 {ts}\n第{u['上班次数']}次上班")
             
-            # 下班
             elif cmd == "下班":
                 if state not in ["working", "in_activity"]:
                     send(chat_id, f"👤 {user_name}\n🆔 {user_id}\n❌ 下班失败！还没上班")
@@ -516,7 +593,6 @@ while True:
                     msgs.append(f"总工作时长：{fmt(new_u['总工作时长'])}")
                     send(chat_id, "\n".join(msgs))
             
-            # 回座
             elif cmd == "回座":
                 if state == "off":
                     send(chat_id, f"👤 {user_name}\n🆔 {user_id}\n❌ 请先【上班】")
@@ -558,7 +634,6 @@ while True:
                         f"第{u[act_count_key]}次{act}\n"
                         f"今日{act}总时长：{fmt(daily_activity.get(act, 0))}")
             
-            # 活动
             elif cmd in ["吃饭", "上厕所", "抽烟", "其他"]:
                 if state == "in_activity":
                     send(chat_id, f"👤 {user_name}\n🆔 {user_id}\n❌ 请先【回座】结束当前活动")
