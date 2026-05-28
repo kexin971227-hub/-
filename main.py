@@ -12,7 +12,6 @@ LOG_DIR = "logs"
 if not os.path.exists(LOG_DIR):
     os.makedirs(LOG_DIR)
 
-# 配置日志格式
 log_filename = os.path.join(LOG_DIR, f"bot_{datetime.now().strftime('%Y-%m-%d')}.log")
 logging.basicConfig(
     level=logging.INFO,
@@ -44,19 +43,27 @@ BASE_URL = f"https://api.safew.org/bot{BOT_TOKEN}"
 DATA_FILE = "data.json"
 GROUP_ID = -10000602092
 
-# 管理员ID列表（接收重置前的考勤记录）
+# 管理员ID列表
 ADMIN_IDS = [13227717]
 
-# 应到人员名单
+# 需要排除的人员（不计入考勤）
+EXCLUDE_NAMES = ["Ellen匪", "表", "雨夜带刀不带伞", "红牛", "二东", "阿航", "大力出奇迹"]
+
+# 新成员自动记录文件
+NEW_MEMBERS_FILE = "new_members.json"
+
+# 初始固定人员名单
 FIXED_USERS = {
+    "天洋": "13440085",
+    "小凯": "13440486",
     "小明": "13234569",
     "林云": "13321501",
     "林强": "13235219",
     "小飞": "13235403",
     "小涛": "13234715",
-    "甄子丹": "13234945",
+    "招财": "13234945",
     "路克": "13235100",
-    "招财": "13235185",
+    "甄子丹": "13235185",
     "啊朕": "13233448",
     "阿鬼": "13198948",
     "2胖": "13198655",
@@ -88,8 +95,6 @@ FIXED_USERS = {
     "老二": "13234476"
 }
 
-EXCLUDE_NAMES = ["Ellen匪", "表", "雨夜带刀不带伞", "红牛", "二东", "阿航", "大力出奇迹"]
-
 KEYBOARD = {
     "keyboard": [
         ["上班", "下班"],
@@ -98,6 +103,48 @@ KEYBOARD = {
     ],
     "resize_keyboard": True
 }
+
+# ========== 新成员管理 ==========
+def load_new_members():
+    """加载自动记录的新成员"""
+    if os.path.exists(NEW_MEMBERS_FILE):
+        with open(NEW_MEMBERS_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+def save_new_members(members):
+    with open(NEW_MEMBERS_FILE, "w") as f:
+        json.dump(members, f, ensure_ascii=False, indent=2)
+
+def get_all_users():
+    """获取所有需要统计的人员（固定名单 + 自动识别的新成员）"""
+    all_users = FIXED_USERS.copy()
+    new_members = load_new_members()
+    all_users.update(new_members)
+    return all_users
+
+def auto_add_user(user_id, user_name):
+    """自动识别并添加新成员到考勤名单"""
+    # 跳过排除名单
+    if user_name in EXCLUDE_NAMES:
+        return False
+    
+    # 检查是否已在固定名单中
+    if user_name in FIXED_USERS or user_id in FIXED_USERS.values():
+        return False
+    
+    # 检查是否已记录
+    new_members = load_new_members()
+    if user_name not in new_members and user_id not in new_members.values():
+        new_members[user_name] = user_id
+        save_new_members(new_members)
+        log_print(f"📝 自动添加新成员: {user_name} ({user_id}) 到考勤名单")
+        
+        # 通知管理员
+        for admin_id in ADMIN_IDS:
+            send(admin_id, f"📝 新成员自动加入考勤名单\n👤 姓名：{user_name}\n🆔 ID：{user_id}\n\n该成员将从今天起纳入考勤统计")
+        return True
+    return False
 
 def load():
     if os.path.exists(DATA_FILE):
@@ -120,32 +167,26 @@ def send(chat_id, text):
         log_print(f"发送消息失败: {e}", "error")
 
 def send_long_message(chat_id, text, max_len=4096):
-    """分页发送长消息，自动判断是否需要分页，保持每个员工完整"""
+    """分页发送长消息"""
     if len(text) <= max_len:
         send(chat_id, text)
-        log_print(f"发送单条消息 (长度: {len(text)} 字符)")
         return
     
     lines = text.split('\n')
     
-    # 找到所有员工开始的位置（格式："姓名："）
+    # 找到所有员工开始的位置
     employee_indices = []
     for i, line in enumerate(lines):
         stripped = line.strip()
         if re.match(r'^[\u4e00-\u9fa5a-zA-Z0-9]+：$', stripped):
             employee_indices.append(i)
     
-    # 如果没有找到员工分割点，简单按行切分
     if len(employee_indices) < 2:
         current_page = ""
         page_num = 1
-        total_pages = (len(text) + max_len - 1) // max_len
         for line in lines:
             if len(current_page) + len(line) + 1 > max_len:
-                if total_pages > 1:
-                    current_page += f"\n\n--- 第 {page_num}/{total_pages} 页 ---"
                 send(chat_id, current_page)
-                log_print(f"已发送第 {page_num}/{total_pages} 页")
                 page_num += 1
                 current_page = line
             else:
@@ -154,55 +195,40 @@ def send_long_message(chat_id, text, max_len=4096):
                 else:
                     current_page = line
         if current_page:
-            if total_pages > 1:
-                current_page += f"\n\n--- 第 {page_num}/{total_pages} 页 ---"
             send(chat_id, current_page)
-            log_print(f"已发送第 {page_num}/{total_pages} 页")
         return
     
-    # 找到标题部分（准时/迟到/缺勤名单）
+    # 找到标题部分
     header_end = employee_indices[0]
     header_lines = lines[:header_end]
     header_text = '\n'.join(header_lines)
     
-    # 收集所有员工块
     employee_indices.append(len(lines))
     employee_blocks = []
     for idx in range(len(employee_indices) - 1):
         start = employee_indices[idx]
         end = employee_indices[idx + 1]
-        employee_text = '\n'.join(lines[start:end])
-        employee_blocks.append(employee_text)
+        employee_blocks.append('\n'.join(lines[start:end]))
     
-    # 分页
     pages = []
     current_page = header_text
-    current_length = len(current_page)
-    
     for block in employee_blocks:
-        block_len = len(block)
-        if current_length + block_len + 2 > max_len and current_length > len(header_text):
+        if len(current_page) + len(block) + 2 > max_len and len(current_page) > len(header_text):
             pages.append(current_page)
             current_page = block
-            current_length = block_len
         else:
             if current_page:
                 current_page += "\n\n" + block
-                current_length += block_len + 2
             else:
                 current_page = block
-                current_length = block_len
     
     if current_page:
         pages.append(current_page)
     
-    # 发送所有页面
-    total_pages = len(pages)
     for i, page in enumerate(pages, 1):
-        if total_pages > 1:
-            page += f"\n\n--- 第 {i}/{total_pages} 页 ---"
+        if len(pages) > 1:
+            page += f"\n\n--- 第 {i}/{len(pages)} 页 ---"
         send(chat_id, page)
-        log_print(f"已发送第 {i}/{total_pages} 页 (长度: {len(page)} 字符)")
         time.sleep(0.3)
 
 def fmt(seconds):
@@ -217,11 +243,10 @@ def fmt(seconds):
     return f"{m}分{s}秒"
 
 def get_full_attendance_report():
-    """生成考勤报告（每次活动单独判断超时）"""
+    """生成考勤报告（包含自动识别的新成员）"""
     db = load()
     now = beijing_now()
     
-    # 如果当前时间在凌晨3点之前，日期按前一天计算
     if now.hour < 3:
         report_date = now - timedelta(days=1)
     else:
@@ -235,8 +260,10 @@ def get_full_attendance_report():
     else:
         deadline = report_date.replace(hour=9, minute=0, second=0, microsecond=0)
     
+    all_users = get_all_users()
     user_data = {}
-    for name, uid in FIXED_USERS.items():
+    
+    for name, uid in all_users.items():
         if name in EXCLUDE_NAMES:
             continue
         u = db.get(uid, {})
@@ -323,21 +350,18 @@ def get_full_attendance_report():
         msg += "\n"
     
     msg += f"📋 个人活动明细：\n"
-    for name in FIXED_USERS:
+    for name in all_users:
         if name in EXCLUDE_NAMES:
             continue
-        d = user_data[name]
-        records = d["counts"]["activity_records"]
-        timeout_records = d["counts"]["timeout_records"]
-        
-        if d["check_time"] is None and not records and d["counts"]["漏打卡次数"] == 0:
+        d = user_data.get(name)
+        if not d or (d["check_time"] is None and not d["counts"]["activity_records"] and d["counts"]["漏打卡次数"] == 0):
             continue
         
         msg += f"\n{name}：\n"
         if d["total_activity_time"] > 0:
             msg += f"  今日活动总时长：{fmt(d['total_activity_time'])}\n"
         
-        for record in records:
+        for record in d["counts"]["activity_records"]:
             act = record.get("activity")
             duration = record.get("duration", 0)
             limit = {"抽烟": 5, "上厕所": 15, "吃饭": 30}.get(act, 0)
@@ -352,10 +376,10 @@ def get_full_attendance_report():
         if cnt["漏打卡次数"] > 0:
             msg += f"  ⚠️ 漏打卡次数：{cnt['漏打卡次数']}\n"
         
-        if timeout_records:
+        if cnt["timeout_records"]:
             msg += f"  ⚠️ 超时明细：\n"
             idx = 1
-            for record in timeout_records:
+            for record in cnt["timeout_records"]:
                 total = record.get("total_duration", 0)
                 overtime = record.get("duration", 0)
                 time_str = record.get("time", "")
@@ -373,7 +397,7 @@ def get_full_attendance_report():
                 msg += f"，抽烟{cnt['抽烟次数']}次"
             msg += "\n"
     
-    total_expected = len([n for n in FIXED_USERS if n not in EXCLUDE_NAMES])
+    total_expected = len([n for n in all_users if n not in EXCLUDE_NAMES])
     total_present = len(on_time_list) + len(late_list)
     msg += f"\n📈 全员汇总：\n"
     msg += f"  应到人数：{total_expected} 人\n"
@@ -416,8 +440,6 @@ def daily_reset_loop():
 def schedule_loop():
     while True:
         now = beijing_now()
-        weekday = now.weekday()
-        # 定时发送也要考虑凌晨3点前的日期问题
         if now.hour < 3:
             send_date = now - timedelta(days=1)
         else:
@@ -446,8 +468,7 @@ log_print("机器人启动...")
 log_print("每日凌晨3点重置数据")
 log_print("周一到周六9:10、周日12:10自动发送考勤统计")
 log_print("发送 /sendreport 查看全员个人明细")
-log_print(f"日志文件保存在: {LOG_DIR}/")
-log_print(f"管理员ID: {ADMIN_IDS}")
+log_print("🤖 自动识别新成员：新成员第一次打卡时自动加入考勤名单")
 
 last_id = 0
 keyboard_activated = set()
@@ -475,6 +496,9 @@ while True:
             user_name = msg["from"].get("first_name", "") or str(user_id)
             text = msg.get("text", "").strip()
             
+            # 自动识别新成员（只要发消息就检查）
+            auto_add_user(user_id, user_name)
+            
             if text == "/sendreport":
                 report = get_full_attendance_report()
                 send_long_message(chat_id, report)
@@ -495,7 +519,7 @@ while True:
             elif text in ["其", "其他", "qt"]:
                 cmd = "其他"
             elif text == "/start":
-                send(chat_id, f"📋 打卡机器人\n👤 {user_name}\n🆔 {user_id}\n\n上-上班 下-下班 回-回座\n吃/厕/抽/其-活动\n发送 /sendreport 查看全员考勤明细")
+                send(chat_id, f"📋 打卡机器人\n👤 {user_name}\n🆔 {user_id}\n\n上-上班 下-下班 回-回座\n吃/厕/抽/其-活动\n发送 /sendreport 查看全员考勤明细\n\n🤖 新成员首次打卡会自动加入考勤名单")
                 continue
             else:
                 continue
