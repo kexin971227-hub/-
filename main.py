@@ -47,7 +47,7 @@ GROUP_ID = -10000602092
 ADMIN_IDS = [13227717]
 
 # 需要排除的人员（不计入考勤）
-EXCLUDE_NAMES = ["Ellen匪", "表", "雨夜带刀不带伞", "红牛", "二东", "阿航", "大力出奇迹"，]
+EXCLUDE_NAMES = ["Ellen匪", "表", "雨夜带刀不带伞", "红牛", "二东", "阿航", "大力出奇迹"]
 
 # 新成员自动记录文件
 NEW_MEMBERS_FILE = "new_members.json"
