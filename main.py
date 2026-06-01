@@ -47,7 +47,7 @@ GROUP_ID = -10000602092
 ADMIN_IDS = [13227717]
 
 # 需要排除的人员（不计入考勤）
-EXCLUDE_NAMES = ["Ellen匪", "表", "雨夜带刀不带伞", "红牛", "二东", "阿航", "大力出奇迹"]
+EXCLUDE_NAMES = ["Ellen匪", "表", "雨夜带刀不带伞", "红牛", "二东", "阿航", "大力出奇迹", "蓝心羽"]
 
 # 新成员自动记录文件
 NEW_MEMBERS_FILE = "new_members.json"
@@ -82,7 +82,6 @@ FIXED_USERS = {
     "阿枫": "13321490",
     "毛毛": "13233117",
     "阿飞": "13232756",
-    "蓝心羽": "13232984",
     "阿乐": "10515461",
     "星辰": "13198685",
     "旺仔": "13305478",
@@ -92,7 +91,8 @@ FIXED_USERS = {
     "南宫": "13234669",
     "阿超": "13233739",
     "小九": "13317648",
-    "老二": "13234476"
+    "老二": "13234476",
+    "阿宇": "13425919"
 }
 
 KEYBOARD = {
@@ -125,22 +125,18 @@ def get_all_users():
 
 def auto_add_user(user_id, user_name):
     """自动识别并添加新成员到考勤名单"""
-    # 跳过排除名单
     if user_name in EXCLUDE_NAMES:
         return False
     
-    # 检查是否已在固定名单中
     if user_name in FIXED_USERS or user_id in FIXED_USERS.values():
         return False
     
-    # 检查是否已记录
     new_members = load_new_members()
     if user_name not in new_members and user_id not in new_members.values():
         new_members[user_name] = user_id
         save_new_members(new_members)
         log_print(f"📝 自动添加新成员: {user_name} ({user_id}) 到考勤名单")
         
-        # 通知管理员
         for admin_id in ADMIN_IDS:
             send(admin_id, f"📝 新成员自动加入考勤名单\n👤 姓名：{user_name}\n🆔 ID：{user_id}\n\n该成员将从今天起纳入考勤统计")
         return True
@@ -174,7 +170,6 @@ def send_long_message(chat_id, text, max_len=4096):
     
     lines = text.split('\n')
     
-    # 找到所有员工开始的位置
     employee_indices = []
     for i, line in enumerate(lines):
         stripped = line.strip()
@@ -198,7 +193,6 @@ def send_long_message(chat_id, text, max_len=4096):
             send(chat_id, current_page)
         return
     
-    # 找到标题部分
     header_end = employee_indices[0]
     header_lines = lines[:header_end]
     header_text = '\n'.join(header_lines)
@@ -243,7 +237,7 @@ def fmt(seconds):
     return f"{m}分{s}秒"
 
 def get_full_attendance_report():
-    """生成考勤报告（包含自动识别的新成员）"""
+    """生成考勤报告"""
     db = load()
     now = beijing_now()
     
@@ -408,7 +402,19 @@ def get_full_attendance_report():
     msg += f"\n✅ 统计不影响打卡状态，无需重新打卡"
     return msg
 
-def send_reset_report():
+# ========== 新增：重置前发送到群组 ==========
+def send_reset_report_to_group():
+    """发送重置前的考勤报告到群组"""
+    now = beijing_now()
+    report = get_full_attendance_report()
+    
+    header = f"📋【今日考勤汇总】即将重置数据\n⏰ 重置时间：{now.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+    full_msg = header + report
+    
+    send_long_message(GROUP_ID, full_msg)
+    log_print("已发送重置前考勤报告到群组")
+
+def send_reset_report_to_admin():
     """发送重置前的考勤报告给管理员"""
     now = beijing_now()
     report = get_full_attendance_report()
@@ -430,8 +436,14 @@ def daily_reset_loop():
         log_print(f"距离下次数据重置还有 {wait_seconds/3600:.1f} 小时")
         time.sleep(wait_seconds)
         
-        log_print("准备重置数据，正在发送备份报告给管理员...")
-        send_reset_report()
+        log_print("准备重置数据，正在发送考勤报告...")
+        
+        # 发送到群组
+        send_reset_report_to_group()
+        time.sleep(2)
+        
+        # 发送给管理员
+        send_reset_report_to_admin()
         time.sleep(2)
         
         save({})
@@ -454,7 +466,7 @@ def schedule_loop():
         if now >= target:
             target += timedelta(days=1)
         wait_seconds = (target - now).total_seconds()
-        log_print(f"下次统计时间: {target.strftime('%Y-%m-%d %H:%M:%S')}")
+        log_print(f"下次定时统计时间: {target.strftime('%Y-%m-%d %H:%M:%S')}")
         time.sleep(wait_seconds)
         report = get_full_attendance_report()
         send_long_message(GROUP_ID, report)
@@ -465,7 +477,7 @@ threading.Thread(target=daily_reset_loop, daemon=True).start()
 threading.Thread(target=schedule_loop, daemon=True).start()
 
 log_print("机器人启动...")
-log_print("每日凌晨3点重置数据")
+log_print("每日凌晨3点重置数据（重置前会发送报告到群组和管理员）")
 log_print("周一到周六9:10、周日12:10自动发送考勤统计")
 log_print("发送 /sendreport 查看全员个人明细")
 log_print("🤖 自动识别新成员：新成员第一次打卡时自动加入考勤名单")
@@ -496,7 +508,6 @@ while True:
             user_name = msg["from"].get("first_name", "") or str(user_id)
             text = msg.get("text", "").strip()
             
-            # 自动识别新成员（只要发消息就检查）
             auto_add_user(user_id, user_name)
             
             if text == "/sendreport":
