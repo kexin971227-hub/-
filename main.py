@@ -237,7 +237,7 @@ def get_full_attendance_report():
         total_activity_time = sum(daily_activity.get(act, 0) for act in ["吃饭", "上厕所", "抽烟", "其他"])
         activity_records = u.get("activity_records", [])
         today_records = [r for r in activity_records if r.get("date") == today_str]
-        timeout_limits = {"抽烟": 5, "上厕所": 15, "吃饭": 30}
+        timeout_limits = {"抽烟": 5, "上厕所": 15, "吃饭": 40}
         timeout_records = []
         for record in today_records:
             act = record.get("activity")
@@ -310,7 +310,7 @@ def get_full_attendance_report():
         for record in d["counts"]["activity_records"]:
             act = record.get("activity")
             duration = record.get("duration", 0)
-            limit = {"抽烟": 5, "上厕所": 15, "吃饭": 30}.get(act, 0)
+            limit = {"抽烟": 5, "上厕所": 15, "吃饭": 40}.get(act, 0)
             if limit and duration > limit * 60:
                 overtime = duration - limit * 60
                 msg += f"  {act}：{fmt(duration)} ⚠️ 超时 {fmt(overtime)}\n"
@@ -593,7 +593,7 @@ while True:
                     cnt = u.get(cmd + "次数", 0) + 1
                     limit_msg = ""
                     if cmd == "吃饭":
-                        limit_msg = "⚠️ 超过30分钟算超时"
+                        limit_msg = "⚠️ 超过40分钟算超时"
                     elif cmd == "上厕所":
                         limit_msg = "⚠️ 超过15分钟算超时"
                     elif cmd == "抽烟":
