@@ -47,7 +47,7 @@ ADMIN_IDS = [13227717]
 EXCLUDE_NAMES = ["Ellen匪", "表", "雨夜带刀不带伞", "红牛", "二东", "阿航", "大力出奇迹", "蓝心羽"]
 NEW_MEMBERS_FILE = "new_members.json"
 
-# 固定人员名单（已包含鹏、小韩、小黑）
+# 固定人员名单（已包含所有用户）
 FIXED_USERS = {
     "天洋": "13440085", "小凯": "13440486", "小明": "13234569", "林云": "13321501",
     "林强": "13235219", "小飞": "13235403", "小涛": "13234715", "招财": "13234945",
@@ -59,7 +59,10 @@ FIXED_USERS = {
     "阿乐": "10515461", "星辰": "13198685", "旺仔": "13305478", "大蛇": "13233303",
     "舒克": "13233506", "安仔": "13199957", "南宫": "13234669", "阿超": "13233739",
     "小九": "13317648", "老二": "13234476", "阿宇": "13425919",
-    "鹏": "13503369", "小韩": "13503345", "小黑": "13503470"
+    "鹏": "13503369", "小韩": "13503345", "小黑": "13503470",
+    "元宝": "13624586", "星星": "13624680", "只爱百事可乐": "13665759",
+    "阿翔": "13665131", "大牛": "12905299",
+    "柚子": "13695933", "可乐": "13695924"
 }
 
 KEYBOARD = {
@@ -237,7 +240,8 @@ def get_full_attendance_report():
         total_activity_time = sum(daily_activity.get(act, 0) for act in ["吃饭", "上厕所", "抽烟", "其他"])
         activity_records = u.get("activity_records", [])
         today_records = [r for r in activity_records if r.get("date") == today_str]
-        timeout_limits = {"抽烟": 5, "上厕所": 15, "吃饭": 40}
+        # 超时阈值：吃饭30分钟，上厕所15分钟，抽烟5分钟
+        timeout_limits = {"抽烟": 5, "上厕所": 15, "吃饭": 30}
         timeout_records = []
         for record in today_records:
             act = record.get("activity")
@@ -310,7 +314,7 @@ def get_full_attendance_report():
         for record in d["counts"]["activity_records"]:
             act = record.get("activity")
             duration = record.get("duration", 0)
-            limit = {"抽烟": 5, "上厕所": 15, "吃饭": 40}.get(act, 0)
+            limit = {"抽烟": 5, "上厕所": 15, "吃饭": 30}.get(act, 0)
             if limit and duration > limit * 60:
                 overtime = duration - limit * 60
                 msg += f"  {act}：{fmt(duration)} ⚠️ 超时 {fmt(overtime)}\n"
@@ -593,7 +597,7 @@ while True:
                     cnt = u.get(cmd + "次数", 0) + 1
                     limit_msg = ""
                     if cmd == "吃饭":
-                        limit_msg = "⚠️ 超过40分钟算超时"
+                        limit_msg = "⚠️ 超过30分钟算超时"
                     elif cmd == "上厕所":
                         limit_msg = "⚠️ 超过15分钟算超时"
                     elif cmd == "抽烟":
